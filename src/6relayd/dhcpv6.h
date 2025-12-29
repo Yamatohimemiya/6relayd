@@ -13,25 +13,19 @@
  */
 #pragma once
 
-#define ALL_DHCPV6_RELAYS                                                      \
-  {                                                                            \
-    {                                                                          \
-      {                                                                        \
-        0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,      \
-            0x00, 0x00, 0x01, 0x00, 0x02                                       \
-      }                                                                        \
-    }                                                                          \
-  }
+#define ALL_DHCPV6_RELAYS \
+	{ \
+		{ \
+			{ 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02 } \
+		} \
+	}
 
-#define ALL_DHCPV6_SERVERS                                                     \
-  {                                                                            \
-    {                                                                          \
-      {                                                                        \
-        0xff, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,      \
-            0x00, 0x00, 0x01, 0x00, 0x03                                       \
-      }                                                                        \
-    }                                                                          \
-  }
+#define ALL_DHCPV6_SERVERS \
+	{ \
+		{ \
+			{ 0xff, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03 } \
+		} \
+	}
 
 #define DHCPV6_CLIENT_PORT 546
 #define DHCPV6_SERVER_PORT 547
@@ -82,75 +76,68 @@
 #define DHCPV6_HOP_COUNT_LIMIT 32
 
 struct dhcpv6_client_header {
-  uint8_t msg_type;
-  uint8_t transaction_id[3];
+	uint8_t msg_type;
+	uint8_t transaction_id[3];
 } __attribute__((packed));
 
 struct dhcpv6_relay_header {
-  uint8_t msg_type;
-  uint8_t hop_count;
-  struct in6_addr link_address;
-  struct in6_addr peer_address;
-  uint8_t options[];
+	uint8_t msg_type;
+	uint8_t hop_count;
+	struct in6_addr link_address;
+	struct in6_addr peer_address;
+	uint8_t options[];
 } __attribute__((packed));
 
 struct dhcpv6_relay_forward_envelope {
-  uint8_t msg_type;
-  uint8_t hop_count;
-  struct in6_addr link_address;
-  struct in6_addr peer_address;
-  uint16_t interface_id_type;
-  uint16_t interface_id_len;
-  uint32_t interface_id_data;
-  uint16_t relay_message_type;
-  uint16_t relay_message_len;
+	uint8_t msg_type;
+	uint8_t hop_count;
+	struct in6_addr link_address;
+	struct in6_addr peer_address;
+	uint16_t interface_id_type;
+	uint16_t interface_id_len;
+	uint32_t interface_id_data;
+	uint16_t relay_message_type;
+	uint16_t relay_message_len;
 } __attribute__((packed));
 
 struct dhcpv6_auth_reconfigure {
-  uint16_t type;
-  uint16_t len;
-  uint8_t protocol;
-  uint8_t algorithm;
-  uint8_t rdm;
-  uint32_t replay[2];
-  uint8_t reconf_type;
-  uint8_t key[16];
+	uint16_t type;
+	uint16_t len;
+	uint8_t protocol;
+	uint8_t algorithm;
+	uint8_t rdm;
+	uint32_t replay[2];
+	uint8_t reconf_type;
+	uint8_t key[16];
 } _packed;
 
 struct dhcpv6_ia_hdr {
-  uint16_t type;
-  uint16_t len;
-  uint32_t iaid;
-  uint32_t t1;
-  uint32_t t2;
+	uint16_t type;
+	uint16_t len;
+	uint32_t iaid;
+	uint32_t t1;
+	uint32_t t2;
 } _packed;
 
 struct dhcpv6_ia_prefix {
-  uint16_t type;
-  uint16_t len;
-  uint32_t preferred;
-  uint32_t valid;
-  uint8_t prefix;
-  struct in6_addr addr;
+	uint16_t type;
+	uint16_t len;
+	uint32_t preferred;
+	uint32_t valid;
+	uint8_t prefix;
+	struct in6_addr addr;
 } _packed;
 
 struct dhcpv6_ia_addr {
-  uint16_t type;
-  uint16_t len;
-  struct in6_addr addr;
-  uint32_t preferred;
-  uint32_t valid;
+	uint16_t type;
+	uint16_t len;
+	struct in6_addr addr;
+	uint32_t preferred;
+	uint32_t valid;
 } _packed;
 
-#define dhcpv6_for_each_option(start, end, otype, olen, odata)                 \
-  for (uint8_t *_o = (uint8_t *)(start);                                       \
-       _o + 4 <= (end) && ((otype) = _o[0] << 8 | _o[1]) &&                    \
-       ((odata) = (void *)&_o[4]) &&                                           \
-       ((olen) = _o[2] << 8 | _o[3]) + (odata) <= (end);                       \
-       _o += 4 + (_o[2] << 8 | _o[3]))
+#define dhcpv6_for_each_option(start, end, otype, olen, odata) \
+	for(uint8_t *_o = (uint8_t *) (start); _o + 4 <= (end) && ((otype) = _o[0] << 8 | _o[1]) && ((odata) = (void *) &_o[4]) && ((olen) = _o[2] << 8 | _o[3]) + (odata) <= (end); _o += 4 + (_o[2] << 8 | _o[3]))
 
 int dhcpv6_init_ia(const struct relayd_config *relayd_config, int socket);
-size_t dhcpv6_handle_ia(uint8_t *buf, size_t buflen,
-                        struct relayd_interface *iface,
-                        const struct sockaddr_in6 *addr, const void *data,
-                        const uint8_t *end);
+size_t dhcpv6_handle_ia(uint8_t *buf, size_t buflen, struct relayd_interface *iface, const struct sockaddr_in6 *addr, const void *data, const uint8_t *end);
