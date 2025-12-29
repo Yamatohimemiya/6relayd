@@ -174,7 +174,7 @@ int init_ndp_proxy(const struct relayd_config *relayd_config) {
 // Deinitialize NDP proxy
 void deinit_ndp_proxy() {
   char Proto[4] = {0};
-  char *IPCommandArgs[9] = {0};
+  char *IPCommandArgs[10] = {0};
   IPCommandArgs[0] = "ip";
   IPCommandArgs[1] = "-6";
   IPCommandArgs[2] = "route";
@@ -353,7 +353,7 @@ void relayd_setup_route(const struct in6_addr *addr, int prefixlen,
 // Use rtnetlink to modify kernel routes
 // Use 'ip' command to modify kernel routes (rtnetlink method is not working...)
 
-static char *IPCommandArgs[9] = {0};
+static char *IPCommandArgs[10] = {0};
 static char IPv6[64];
 static char Proto[4];
 
