@@ -29,6 +29,13 @@
 #include <linux/filter.h>
 #include <linux/rtnetlink.h>
 
+#define RTPROT_6RELAYD 66
+
+// NetlinkRecvBuffer: Preserve memory for avoiding out of memory on exit
+// 32KB: https://www.kernel.org/doc/html/v6.6/userspace-api/netlink/intro.html#buffer-sizing
+#define NETLINK_RECV_BUFFER_SIZE 32768
+static char NetlinkRecvBuffer[NETLINK_RECV_BUFFER_SIZE];
+
 static const struct relayd_config *config = NULL;
 
 static void handle_solicit(void *addr, void *data, size_t len,
@@ -61,6 +68,76 @@ static struct sock_filter bpf[] = {
 };
 static const struct sock_fprog bpf_prog = {sizeof(bpf) / sizeof(*bpf), bpf};
 
+int flush_route(){
+
+	{ // Send request of route list
+		struct nl_route {
+			struct nlmsghdr nlmh;
+			struct rtmsg rtm;
+		} nl_route = {0};
+
+		// NLMSGHDR: Netlink message header
+		nl_route.nlmh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+		nl_route.nlmh.nlmsg_type = RTM_GETROUTE;
+		nl_route.nlmh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+		nl_route.nlmh.nlmsg_seq = ++rtnl_seqid;
+
+		// RTMSG: Route message
+		nl_route.rtm.rtm_family = AF_INET6;
+		nl_route.rtm.rtm_table = RT_TABLE_MAIN;
+		nl_route.rtm.rtm_protocol = RTPROT_6RELAYD;
+
+		send(rtnl_event.socket, &nl_route, nl_route.nlmh.nlmsg_len, MSG_DONTWAIT);
+	}
+
+	ssize_t len;
+	struct nlmsghdr *nlmh;
+	struct iovec iov = { NetlinkRecvBuffer, NETLINK_RECV_BUFFER_SIZE };
+	while (1) {
+		//len = recv(rtnl_event.socket, NetlinkRecvBuffer, NETLINK_RECV_BUFFER_SIZE, 0);
+		struct msghdr mh = { 0, 0, &iov, 1, 0, 0, 0 };
+		len = recvmsg(rtnl_event.socket, &mh, 0);
+		if (len <= 0) {
+			return -1;
+		}
+		if (mh.msg_flags & MSG_TRUNC) {
+			printf("E: Netlink message is too large and truncated!\n");
+			return -1;
+		}
+
+		for (nlmh = (struct nlmsghdr *) NetlinkRecvBuffer; NLMSG_OK(nlmh, len); nlmh = NLMSG_NEXT(nlmh, len)) {
+			if (nlmh->nlmsg_type == NLMSG_DONE) {
+				return 0;
+			}
+
+			struct rtmsg *rtm = (struct rtmsg *) NLMSG_DATA(nlmh);
+			struct rtattr *rta = (struct rtattr *) RTM_RTA(rtm);
+
+			if (rtm->rtm_protocol != RTPROT_6RELAYD) {
+				continue;
+			}
+
+			// Change header and send back to kernel
+			nlmh->nlmsg_type = RTM_DELROUTE;
+			nlmh->nlmsg_flags = NLM_F_REQUEST;
+			send(rtnl_event.socket, nlmh, nlmh->nlmsg_len, MSG_WAITALL);
+
+/*
+			int rtl = RTM_PAYLOAD(nlmh);
+			while (RTA_OK(rta, rtl)) {
+				if (rta->rta_type == RTA_DST) {
+					char dest[INET6_ADDRSTRLEN];
+					inet_ntop(AF_INET6, RTA_DATA(rta), dest, sizeof(dest));
+					printf("I: Cleanup route: %s\n", dest);
+				}
+				rta = RTA_NEXT(rta, rtl);
+			}
+*/
+		}
+	}
+	return 0;
+}
+
 // Initialize NDP-proxy
 int init_ndp_proxy(const struct relayd_config *relayd_config) {
   config = relayd_config;
@@ -70,6 +147,9 @@ int init_ndp_proxy(const struct relayd_config *relayd_config) {
   // Setup netlink socket
   if ((rtnl_event.socket = relayd_open_rtnl_socket()) < 0)
     return -1;
+
+  // Cleanup previous session
+  flush_route();
 
   // Receive netlink neighbor and ip-address events
   uint32_t group = RTNLGRP_IPV6_IFADDR;
@@ -83,10 +163,10 @@ int init_ndp_proxy(const struct relayd_config *relayd_config) {
   struct {
     struct nlmsghdr nh;
     struct ifaddrmsg ifa;
-  } req2 = {
-      {sizeof(req2), RTM_GETADDR, NLM_F_REQUEST | NLM_F_DUMP, ++rtnl_seqid, 0},
+  } nl_route = {
+      {sizeof(nl_route), RTM_GETADDR, NLM_F_REQUEST | NLM_F_DUMP, ++rtnl_seqid, 0},
       {.ifa_family = AF_INET6}};
-  send(rtnl_event.socket, &req2, sizeof(req2), MSG_DONTWAIT);
+  send(rtnl_event.socket, &nl_route, sizeof(nl_route), MSG_DONTWAIT);
 
   relayd_register_event(&rtnl_event);
 
@@ -173,35 +253,15 @@ int init_ndp_proxy(const struct relayd_config *relayd_config) {
 
 // Deinitialize NDP proxy
 void deinit_ndp_proxy() {
-  char Proto[4] = {0};
-  char *IPCommandArgs[10] = {0};
-  IPCommandArgs[0] = "ip";
-  IPCommandArgs[1] = "-6";
-  IPCommandArgs[2] = "route";
-  IPCommandArgs[3] = "flush";
-  IPCommandArgs[4] = "proto";
-  IPCommandArgs[5] = Proto;
-  strcpy(Proto, config->route_proto);
-
   printf("I: Unregistering routes...\n");
-  //	printf("I: DEBUG: %s %s %s %s %s %s\n", IPCommandArgs[0],
-  //IPCommandArgs[1], IPCommandArgs[2], IPCommandArgs[3], IPCommandArgs[4],
-  //IPCommandArgs[5]);
 
-  pid_t P = fork();
-  if (P == 0) {
-    execvp("ip", IPCommandArgs);
-    printf("E: Failed to exec: %i\n", errno);
-    exit(0);
+  while (!list_empty(&neighbors)) {
+          struct ndp_neighbor *c = list_first_entry(&neighbors,
+                          struct ndp_neighbor, head);
+          modify_neighbor(&c->addr, c->iface, false);
   }
 
-  /*
-          while (!list_empty(&neighbors)) {
-                  struct ndp_neighbor *c = list_first_entry(&neighbors,
-                                  struct ndp_neighbor, head);
-                  modify_neighbor(&c->addr, c->iface, false);
-          }
-  */
+  flush_route();
 }
 
 // Send an ICMP-ECHO. This is less for actually pinging but for the
@@ -308,54 +368,62 @@ static void handle_solicit(void *addr, void *data, size_t len,
 void relayd_setup_route(const struct in6_addr *addr, int prefixlen,
                         const struct relayd_interface *iface,
                         const struct in6_addr *gw, bool add) {
-  struct req {
-    struct nlmsghdr nh;
-    struct rtmsg rtm;
-    struct rtattr rta_dst;
-    struct in6_addr dst_addr;
-    struct rtattr rta_oif;
-    uint32_t ifindex;
-    struct rtattr rta_table;
-    uint32_t table;
-    struct rtattr rta_gw;
-    struct in6_addr gw;
-  } req = {
-      {sizeof(req), 0, NLM_F_REQUEST, ++rtnl_seqid, 0},
-      {AF_INET6, prefixlen, 0, 0, 0, 0, 0, 0, 0},
-      {sizeof(struct rtattr) + sizeof(struct in6_addr), RTA_DST},
-      *addr,
-      {sizeof(struct rtattr) + sizeof(uint32_t), RTA_OIF},
-      iface->ifindex,
-      {sizeof(struct rtattr) + sizeof(uint32_t), RTA_TABLE},
-      RT_TABLE_MAIN,
-      {sizeof(struct rtattr) + sizeof(struct in6_addr), RTA_GATEWAY},
-      IN6ADDR_ANY_INIT,
-  };
 
-  if (gw)
-    req.gw = *gw;
+  struct nl_route {
+      struct nlmsghdr nlmh;
+      struct rtmsg rtm;
+      char rta[RTA_SPACE(sizeof(struct in6_addr)) + RTA_SPACE(sizeof(iface->ifindex)) + RTA_SPACE(sizeof(struct in6_addr))];
+  } nl_route = {0};
+
+  // NLMSGHDR: Netlink message header
+  nl_route.nlmh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+  nl_route.nlmh.nlmsg_seq = ++rtnl_seqid;
+
+  // RTMSG: Route message
+  nl_route.rtm.rtm_family = AF_INET6;
+  nl_route.rtm.rtm_dst_len = prefixlen;
+  nl_route.rtm.rtm_table = RT_TABLE_MAIN;
+  nl_route.rtm.rtm_protocol = RTPROT_6RELAYD;
 
   if (add) {
-    req.nh.nlmsg_type = RTM_NEWROUTE;
-    req.nh.nlmsg_flags |= (NLM_F_CREATE | NLM_F_REPLACE);
-    req.rtm.rtm_protocol = RTPROT_BOOT;
-    req.rtm.rtm_scope = (gw) ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
-    req.rtm.rtm_type = RTN_UNICAST;
+      nl_route.nlmh.nlmsg_type = RTM_NEWROUTE;
+      nl_route.nlmh.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE;
+      nl_route.rtm.rtm_scope = (gw) ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
+      nl_route.rtm.rtm_type = RTN_UNICAST;
   } else {
-    req.nh.nlmsg_type = RTM_DELROUTE;
-    req.rtm.rtm_scope = RT_SCOPE_NOWHERE;
+      nl_route.nlmh.nlmsg_type = RTM_DELROUTE;
+      nl_route.nlmh.nlmsg_flags = NLM_F_REQUEST;
+      nl_route.rtm.rtm_scope = RT_SCOPE_NOWHERE;
   }
 
-  size_t reqlen = (gw) ? sizeof(req) : offsetof(struct req, rta_gw);
-  send(rtnl_event.socket, &req, reqlen, MSG_DONTWAIT);
+  // RTATTR
+  int* rta_pos = &(nl_route.nlmh.nlmsg_len);
+
+  // RTA_DST: Route destination address
+  struct rtattr *rta_dst = (struct rtattr *)(((char *)&nl_route) + NLMSG_ALIGN(*rta_pos));
+  rta_dst->rta_type = RTA_DST;
+  rta_dst->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+  memcpy(RTA_DATA(rta_dst), addr, sizeof(struct in6_addr));
+  *rta_pos = NLMSG_ALIGN(*rta_pos) + RTA_LENGTH(sizeof(struct in6_addr));
+
+  // RTA_OIF: Output interface index
+  struct rtattr *rta_oif = (struct rtattr *)(((char *)&nl_route) + NLMSG_ALIGN(*rta_pos));
+  rta_oif->rta_type = RTA_OIF;
+  rta_oif->rta_len = RTA_LENGTH(sizeof(iface->ifindex));
+  memcpy(RTA_DATA(rta_oif), &iface->ifindex, sizeof(iface->ifindex));
+  *rta_pos = NLMSG_ALIGN(*rta_pos) + RTA_LENGTH(sizeof(iface->ifindex));
+
+  if(gw){
+      // RTA_GATEWAY: The gateway of the route
+      struct rtattr *rta_gw = (struct rtattr *)(((char *)&nl_route) + NLMSG_ALIGN(*rta_pos));
+      rta_gw->rta_type = RTA_GATEWAY;
+      rta_gw->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+      memcpy(RTA_DATA(rta_gw), gw, sizeof(struct in6_addr));
+      *rta_pos = NLMSG_ALIGN(*rta_pos) + RTA_LENGTH(sizeof(struct in6_addr));
+  }
+
+  send(rtnl_event.socket, &nl_route, *rta_pos, MSG_DONTWAIT);
 }
-
-// Use rtnetlink to modify kernel routes
-// Use 'ip' command to modify kernel routes (rtnetlink method is not working...)
-
-static char *IPCommandArgs[10] = {0};
-static char IPv6[64];
-static char Proto[4];
 
 static void setup_route(struct in6_addr *addr, struct relayd_interface *iface,
                         bool add) {
@@ -368,39 +436,11 @@ static void setup_route(struct in6_addr *addr, struct relayd_interface *iface,
     return;
   }
 
-  if (IPCommandArgs[0] == 0) {
-    IPCommandArgs[0] = "ip";
-    IPCommandArgs[1] = "-6";
-    IPCommandArgs[2] = "route";
-    IPCommandArgs[5] = "dev";
-    IPCommandArgs[7] = "proto";
-    IPCommandArgs[8] = Proto;
-  }
-  if (add) {
-    IPCommandArgs[3] = "add";
-  } else {
-    IPCommandArgs[3] = "del";
-  }
+  static const char const* ADD="Add";
+  static const char const* DEL="Delete";
+  printf("I: %s route: %s -> %s\n", add ? ADD : DEL, namebuf, iface->ifname);
 
-  strcpy(IPv6, namebuf);
-  strcpy(Proto, config->route_proto);
-
-  IPCommandArgs[4] = IPv6;
-  IPCommandArgs[6] = iface->ifname;
-  printf("I: %s Route: %s -> %s\n", IPCommandArgs[3], IPCommandArgs[4],
-         IPCommandArgs[6]);
-  //	printf("I: DEBUG: %s %s %s %s %s %s %s %s %s\n", IPCommandArgs[0],
-  //IPCommandArgs[1], IPCommandArgs[2], IPCommandArgs[3], IPCommandArgs[4],
-  //IPCommandArgs[5], IPCommandArgs[6], IPCommandArgs[7], IPCommandArgs[8]);
-
-  pid_t P = fork();
-  if (P == 0) {
-    execvp("ip", IPCommandArgs);
-    printf("E: Failed to exec: %i\n", errno);
-    exit(0);
-  }
-
-  //	relayd_setup_route(addr, 128, iface, NULL, add);
+  relayd_setup_route(addr, 128, iface, NULL, add);
 }
 
 static void free_neighbor(struct ndp_neighbor *n) {
