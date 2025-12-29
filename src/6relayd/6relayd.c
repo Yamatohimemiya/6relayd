@@ -279,6 +279,10 @@ int main(int argc, char *const argv[]) {
 
 static int print_usage(const char *name) {
 	fprintf(stderr,
+		"6relayd: Version " VERSION_STR "\n"
+		"Copyright (C) 2012-2013 Steven Barth\n"
+		"Copyright (C) 2024-2025 Hikaru Yamatohimemiya\n"
+		"\n"
 		"Usage: %s [options] <master> [[~]<slave1> [[~]<slave2> [...]]]\n"
 		"\nNote: to use server features only (no relaying) set master to '.'\n"
 		"\nFeatures:\n"

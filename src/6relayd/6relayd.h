@@ -21,6 +21,8 @@
 
 #include "list.h"
 
+#define VERSION_STR "1.1.0.0"
+
 #if !defined(SYS_clock_gettime)
 	#define SYS_clock_gettime SYS_clock_gettime32
 #endif
